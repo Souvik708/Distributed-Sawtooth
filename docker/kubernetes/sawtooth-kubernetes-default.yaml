@@ -52,7 +52,7 @@ items:
               - "xo-tp-python -vv -C tcp://$HOSTNAME:4004"
 
           - name: sawtooth-validator
-            image: hyperledger/sawtooth-validator:chime
+            image: souvik708/sawtooth-validator-local:latest
             ports:
               - name: tp
                 containerPort: 4004

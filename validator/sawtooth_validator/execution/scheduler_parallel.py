@@ -15,6 +15,8 @@
 
 from itertools import filterfalse
 from threading import Condition
+import time
+import datetime
 import logging
 from collections import deque
 from collections import namedtuple
@@ -28,12 +30,55 @@ from sawtooth_validator.execution.scheduler import TxnInformation
 from sawtooth_validator.execution.scheduler import Scheduler
 from sawtooth_validator.execution.scheduler import SchedulerIterator
 from sawtooth_validator.execution.scheduler_exceptions import SchedulerError
+from ctypes import cdll
+from ctypes import c_int
+
+# load the library
+lib = cdll.LoadLibrary('./DAG/libgeek.so')
 
 LOGGER = logging.getLogger(__name__)
 
 
 _AnnotatedBatch = namedtuple('ScheduledBatch',
                              ['batch', 'required', 'preserve'])
+
+
+# create a Geek class
+class Geek(object):
+  
+    # constructor
+    def __init__(self):
+  
+        # attribute
+        self.obj = lib.Geek_new()
+  
+
+    # define method
+    def DAG_prune(self):
+        lib.DAGPrune(self.obj)
+
+    # define method
+    def DAG_create(self):
+        return lib.DAGCreate(self.obj)
+
+    # define method
+    def DAG_create2(self):
+        lib.DAGPrint(self.obj)
+
+
+    # define method
+    def DAG_select(self):
+        return lib.DAGSelect(self.obj)
+
+     # define method
+    def DAG_secureValidator(self):
+        return lib.SecureValidator(self.obj)
+
+ 
+ 
+    # define method
+    def DAG_delete(self, int):
+        lib.DAGDelete(self.obj, int )
 
 
 class AddressNotInTree(Exception):
@@ -462,6 +507,19 @@ class ParallelScheduler(Scheduler):
         self._condition = Condition()
         self._predecessor_tree = PredecessorTree()
         self._txn_predecessors = {}
+        self.DAG_module = Geek()
+        self.flag=False;
+        self.exe_start = time.time()
+        self.exe_end = time.time()
+        self.DAG_start = time.time()
+        self.DAG_end = time.time()
+        self.DAG_end2 = time.time()        
+        self.VAL_start = time.time()
+        self.VAL_end = time.time()
+        self.sel_start = time.time()
+        self.sel_end = time.time()
+        self.cal=self.sel_end-self.sel_start
+
 
         self._always_persist = always_persist
 
@@ -471,6 +529,7 @@ class ParallelScheduler(Scheduler):
         # since order is important; SchedulerIterator instances, for example,
         # must all return scheduled transactions in the same order.
         self._scheduled = []
+        self.txn_count = 0;
 
         # Transactions that must be replayed but the prior result hasn't
         # been returned yet.
@@ -500,32 +559,11 @@ class ParallelScheduler(Scheduler):
         self._txn_results = {}
 
         self._txns_available = OrderedDict()
+        self._total_txn = []
         self._transactions = {}
 
         self._cancelled = False
         self._final = False
-
-    def _find_input_dependencies(self, inputs):
-        """Use the predecessor tree to find dependencies based on inputs.
-
-        Returns: A list of transaction ids.
-        """
-        dependencies = []
-        for address in inputs:
-            dependencies.extend(
-                self._predecessor_tree.find_read_predecessors(address))
-        return dependencies
-
-    def _find_output_dependencies(self, outputs):
-        """Use the predecessor tree to find dependencies based on outputs.
-
-        Returns: A list of transaction ids.
-        """
-        dependencies = []
-        for address in outputs:
-            dependencies.extend(
-                self._predecessor_tree.find_write_predecessors(address))
-        return dependencies
 
     def add_batch(self, batch, state_hash=None, required=False):
         with self._condition:
@@ -549,56 +587,48 @@ class ParallelScheduler(Scheduler):
             self._batches.append(batch)
             self._batches_by_id[batch.header_signature] = \
                 _AnnotatedBatch(batch, required=required, preserve=preserve)
+            self.DAG_start = time.time()
+            self.flag=False;
+            f = open("DAG/batch_for_DAG.txt", "w")
+            predecessors = []
             for txn in batch.transactions:
                 self._batches_by_txn_id[txn.header_signature] = batch
                 self._txns_available[txn.header_signature] = txn
                 self._transactions[txn.header_signature] = txn
 
+                header = TransactionHeader()
+                header.ParseFromString(txn.header)
+                txn_id = txn.header_signature
+                self._txn_predecessors[txn_id] = []
+                self._predecessor_chain.add_relationship(txn_id=txn_id,predecessors=predecessors)
+
+                f.write(str(header.nonce))
+                self._total_txn.append(txn);
+                f.write("\n")
+                f.write(str(len(header.inputs)))
+                f.write("\n")
+                for address in header.inputs:
+                    f.write(str(address))
+                    f.write("\n")
+                f.write(str(len(header.outputs)))
+                f.write("\n")
+                for address in header.inputs:
+                   f.write(str(address))
+                   f.write("\n")
+
+            f.close()
+            self.DAG_end = time.time()  
+            LOGGER.warning("DAG create is called")
+            tempx = self.DAG_module.DAG_create()
+            LOGGER.warning(tempx)
+            LOGGER.warning("DAG create ended")            
+            self.DAG_end2 = time.time()      
+            #temp.close()
+            self.VAL_start = time.time()
+            self.VAL_end = time.time()
             if state_hash is not None:
                 b_id = batch.header_signature
                 self._batches_with_state_hash[b_id] = state_hash
-
-            # For dependency handling: First, we determine our dependencies
-            # based on the current state of the predecessor tree.  Second,
-            # we update the predecessor tree with reader and writer
-            # information based on input and outputs.
-            for txn in batch.transactions:
-                header = TransactionHeader()
-                header.ParseFromString(txn.header)
-
-                # Calculate predecessors (transaction ids which must come
-                # prior to the current transaction).
-                predecessors = self._find_input_dependencies(header.inputs)
-                predecessors.extend(
-                    self._find_output_dependencies(header.outputs))
-
-                txn_id = txn.header_signature
-                # Update our internal state with the computed predecessors.
-                self._txn_predecessors[txn_id] = set(predecessors)
-                self._predecessor_chain.add_relationship(
-                    txn_id=txn_id,
-                    predecessors=predecessors)
-
-                # Update the predecessor tree.
-                #
-                # Order of reader/writer operations is relevant.  A writer
-                # may overshadow a reader.  For example, if the transaction
-                # has the same input/output address, the end result will be
-                # this writer (txn.header_signature) stored at the address of
-                # the predecessor tree.  The reader information will have been
-                # discarded.  Write operations to partial addresses will also
-                # overshadow entire parts of the predecessor tree.
-                #
-                # Thus, the order here (inputs then outputs) will cause the
-                # minimal amount of relevant information to be stored in the
-                # predecessor tree, with duplicate information being
-                # automatically discarded by the set_writer() call.
-                for address in header.inputs:
-                    self._predecessor_tree.add_reader(
-                        address, txn_id)
-                for address in header.outputs:
-                    self._predecessor_tree.set_writer(
-                        address, txn_id)
 
             self._condition.notify_all()
 
@@ -923,15 +953,15 @@ class ParallelScheduler(Scheduler):
         # dependencies that could have failed this txn did so.
         contexts = []
         txn_dependencies = deque()
-        txn_dependencies.extend(self._txn_predecessors[txn.header_signature])
+        #txn_dependencies.extend(self._txn_predecessors[txn.header_signature])
         while txn_dependencies:
             prior_txn_id = txn_dependencies.popleft()
             if self._txn_is_in_valid_batch(prior_txn_id):
                 result = self._txn_results[prior_txn_id]
                 if (prior_txn_id, result.context_id) not in contexts:
                     contexts.append((prior_txn_id, result.context_id))
-            else:
-                txn_dependencies.extend(self._txn_predecessors[prior_txn_id])
+#            else:
+                #txn_dependencies.extend(self._txn_predecessors[prior_txn_id])
 
         contexts.sort(
             key=lambda x: self._index_of_txn_in_schedule(x[0]),
@@ -961,24 +991,40 @@ class ParallelScheduler(Scheduler):
             # We return the next transaction which hasn't been scheduled and
             # is not blocked by a dependency.
 
+            if(self.flag==False):
+                self.flag=True
+                self.exe_start = time.time()            
             next_txn = None
-
+            next = -1
+            txn_id=None
             no_longer_available = []
+            # LOGGER.warning("next is called")
 
-            for txn_id, txn in self._txns_available.items():
-                if (self._has_predecessors(txn_id)
-                        or self._is_outstanding(txn_id)):
+            while(len(self._txns_available.items())):
+                self.sel_start = time.time()            
+                next = self.DAG_module.DAG_select()
+                #LOGGER.warning(self.DAG_module.DAG_indeg())
+                self.sel_end = time.time()
+                self.cal=self.sel_end-self.sel_start+self.cal
+                if next== -1:
                     continue
-
+                txn=self._total_txn[next]
+                txn_id=txn.header_signature
+                if (self._is_outstanding(txn_id)):
+                    continue
                 header = TransactionHeader()
                 header.ParseFromString(txn.header)
                 deps = tuple(header.dependencies)
 
                 if self._dependency_not_processed(deps):
+                    #self.DAG_module.DAG_undo(next)
+                    L# OGGER.warning("txn gets first appended")
                     continue
 
                 if self._txn_failed_by_dep(deps):
                     no_longer_available.append(txn_id)
+                    #self.DAG_module.DAG_undo(next)
+                    # LOGGER.warning("txn gets appended")
                     self._txn_results[txn_id] = \
                         TxnExecutionResult(
                             signature=txn_id,
@@ -986,6 +1032,7 @@ class ParallelScheduler(Scheduler):
                             context_id=None,
                             state_hash=None)
                     continue
+
 
                 if not self._txn_is_in_valid_batch(txn_id) and \
                         self._can_fail_fast(txn_id):
@@ -997,22 +1044,26 @@ class ParallelScheduler(Scheduler):
                             state_hash=None)
                     no_longer_available.append(txn_id)
                     continue
-
                 next_txn = txn
                 break
 
+            if not txn_id in self._txns_available:
+                next_txn=None
+
             for txn_id in no_longer_available:
                 del self._txns_available[txn_id]
-
+        
             if next_txn is not None:
-                bases = self._get_initial_state_for_transaction(next_txn)
 
+                bases = self._get_initial_state_for_transaction(next_txn)
                 info = TxnInformation(
                     txn=next_txn,
                     state_hash=self._first_state_hash,
-                    base_context_ids=bases)
+                    base_context_ids=bases)	
                 self._scheduled.append(next_txn.header_signature)
+
                 del self._txns_available[next_txn.header_signature]
+                self.DAG_module.DAG_delete(next)
                 self._scheduled_txn_info[next_txn.header_signature] = info
                 return info
             return None
@@ -1118,6 +1169,29 @@ class ParallelScheduler(Scheduler):
     def complete(self, block=True):
         with self._condition:
             if self._complete():
+                self.exe_end = time.time()
+                cal_exe = self.exe_end - self.exe_start
+                cal_wrt = self.DAG_end - self.DAG_start
+                cal_cre = self.DAG_end2 - self.DAG_end     
+                cal_val = self.VAL_end - self.VAL_start                                       
+                #tempx = self.DAG_module.DAG_create()
+                #f = open("timing_computation.txt", "a")
+                #f.write("\n-------------------")
+                #f.write("\nexecution:")
+                #f.write(str(cal_exe+cal_wrt+cal_cre+self.cal))
+                #f.close()     
+
+                #f = open("DS_computation.txt", "a")
+                #f.write("\nADJ_DAG:")
+                #f.write(str(cal_wrt+cal_cre))
+                #f.write("\nSMART:")
+                #f.write(str(cal_wrt+cal_val))
+                #f.close()     
+
+                self.DAG_module.DAG_prune()
+                # LOGGER.warning("prune is called") 
+
+                
                 return True
 
             if block:

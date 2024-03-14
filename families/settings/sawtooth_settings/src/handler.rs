@@ -14,6 +14,9 @@
  * limitations under the License.
  * ------------------------------------------------------------------------------
  */
+ use log::debug;
+ use log::warn;
+ use log::info;
 
 cfg_if! {
      if #[cfg(target_arch = "wasm32")] {
@@ -247,11 +250,27 @@ fn apply_vote(
     save_settings_candidates(context, &setting_candidates)
 }
 
+// fn unpack_data<T>(data: &[u8]) -> Result<T, ApplyError>
+// where
+//     T: protobuf::Message,
+// {
+//     protobuf::parse_from_bytes(&data).map_err(|err| {
+//         warn!(
+//             "Invalid error: Failed to unmarshal SettingsTransaction: {:?}",
+//             err
+//         );
+//         ApplyError::InternalError(format!(
+//             "Failed to unmarshal SettingsTransaction: {:?}",
+//             err
+//         ))
+//     })
+// }
+///////////////////////////////////////////////////////////////////////SOUVIK///////////////////////////////////////////////////////////////////////////////////////
 fn unpack_data<T>(data: &[u8]) -> Result<T, ApplyError>
 where
     T: protobuf::Message,
 {
-    protobuf::parse_from_bytes(&data).map_err(|err| {
+    T::parse_from_bytes(&data).map_err(|err| {
         warn!(
             "Invalid error: Failed to unmarshal SettingsTransaction: {:?}",
             err
@@ -262,6 +281,7 @@ where
         ))
     })
 }
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 fn get_candidate_index(
     setting_candidates: &mut SettingCandidates,
